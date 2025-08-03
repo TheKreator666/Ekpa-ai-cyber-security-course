@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*- 
+import matplotlib.pyplot as plt
+from tensorflow.keras.utils import plot_model
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import confusion_matrix
+from keras.callbacks import ModelCheckpoint, EarlyStopping
+import os
+from tensorflow.keras.utils import to_categorical
+from sklearn.utils import class_weight
+from models import models_ddos
+
+# Set number of epochs and number of classes
+epochs = 100
+nclass = 12 
+
+def loadDataset():
+    # Φόρτωση δεδομένων
+    filename='/path/to/your/dataset.csv'  # Βάλε το σωστό μονοπάτι του dataset
+    trainfile = pd.read_csv(filename)    
+    data = pd.DataFrame(trainfile).to_numpy()
+    
+    # Προεπεξεργασία δεδομένων (φιλτράρισμα κατηγοριών)
+    data = data[data[:,67]!='DrDoS_LDAP']        
+    np.random.shuffle(data)
+    
+    label = data[:, 67].astype('str')
+    
+    # Αντικατάσταση ετικετών με αριθμούς
+    label[label == 'WebDDoS'] = 0
+    label[label == 'BENIGN'] = 1
+    label[label == 'UDP-lag'] = 2
+    label[label == 'DrDoS_NTP'] = 3
+    label[label == 'Syn'] = 4
+    label[label == 'DrDoS_SSDP'] = 5
+    label[label == 'DrDoS_UDP'] = 6
+    label[label == 'DrDoS_NetBIOS'] = 7
+    label[label == 'DrDoS_MSSQL'] = 8
+    label[label == 'DrDoS_SNMP'] = 9
+    label[label == 'TFTP'] = 10
+    label[label == 'DrDoS_DNS'] = 11
+
+    # Επιλογή χαρακτηριστικών
+    inx_sel = -1 + np.array([38,47,37,48,11,9,7,52,10,36,1,34,4,17,19,57,21,18,22,24,32,50,23,55,51,5,3,39,40,43,58,12,25,20,2,35,67,33,6,53])
+    data = data[:, inx_sel]
+    
+    # Κανονικοποίηση Min-Max
+    dmin = data.min(axis=0)
+    dmax = data.max(axis=0)
+    data = (data - dmin) / (dmax - dmin)
+    
+    # Διαχωρισμός δεδομένων σε train, validation, test
+    train_data, test_data, train_label, test_label = train_test_split(data, label, test_size=0.20, stratify=label)
+    train_data, val_data, train_label, val_label = train_test_split(train_data, train_label, test_size=0.125, stratify=train_label)
+
+    return train_data.astype('float32'), train_label.astype('int32'), val_data.astype('float32'), val_label.astype('int32'), test_data.astype('float32'), test_label.astype('int32')
+
+# Φόρτωση δεδομένων
+train_data, train_labelp, val_data, val_labelp, test_data, test_labelp = loadDataset()
+
+# Κατηγοριοποίηση
+train_label = to_categorical(train_labelp, nclass)
+val_label = to_categorical(val_labelp, nclass)
+test_label = to_categorical(test_labelp, nclass)
+
+# Υπολογισμός class weights για την ισορροπία των κλάσεων
+class_weights = class_weight.compute_class_weight(class_weight='balanced', classes=np.unique(train_labelp), y=train_labelp)
+class_weights = {i: class_weights[i] for i in range(len(class_weights))}
+
+# Καθορισμός callbacks
+earlyStopping = EarlyStopping(monitor='val_loss', patience=30, verbose=0, mode='min')
+modelCheckPoint = ModelCheckpoint('./savemodels/model5class.weights.{epoch:03d}-{val_acc:.4f}.hdf5', save_best_only=True, monitor='val_acc', mode='max')
+
+# Δημιουργία του μοντέλου
+model = models_ddos.model_conv1D(lr=1e-4, N=64, inshape=train_data.shape[1])
+
+# Εκτύπωση περιγραφής του μοντέλου
+model.summary()
+
+# Εκπαίδευση του μοντέλου
+history = model.fit(train_data,
+                    train_label,
+                    shuffle=True,
+                    epochs=epochs,
+                    batch_size=256,  # Μπορείς να αλλάξεις το batch size αν χρειαστεί
+                    validation_data=(val_data, val_label),
+                    callbacks=[modelCheckPoint],
+                    class_weight=class_weights)
+
+# Φόρτωση του καλύτερου μοντέλου
+str_models = os.listdir('./savemodels')
+str_models = np.sort(str_models)
+best_model = str_models[str_models.size-1]
+model.load_weights('./savemodels/' + best_model)
+
+# Προβλέψεις και confusion matrix
+pred = model.predict(test_data)
+pred_y = pred.argmax(axis=-1)
+
+cm = confusion_matrix(test_labelp.astype('int32'), pred_y)
+print(cm)
+
+# Προβολή της ακρίβειας για κάθε κατηγορία
+for i in range(nclass):
+    print(f"Accuracy for class {i}: {cm[i, i]/np.sum(cm[i, :]):.4f}")
+
+# Εμφάνιση confusion matrix
+from sklearn.metrics import ConfusionMatrixDisplay
+label = np.array(["WebDDoS","BENIGN","UDP-lag","DrDoS_NTP","Syn", "DrDoS_SSDP","DrDoS_UDP","DrDoS_NetBIOS","DrDoS_MSSQL",
+                  "DrDoS_SNMP","TFTP","DrDoS_DNS"])
+
+cmo = ConfusionMatrixDisplay(cm, display_labels=label)
+fig, ax = plt.subplots(figsize=(12,12))
+cmo.plot(ax=ax, xticks_rotation=45)
+
+# Εμφάνιση γραφημάτων ακρίβειας και απώλειας
+acc = history.history['acc']
+val_acc = history.history['val_acc']
+loss = history.history['loss']
+val_loss = history.history['val_loss']
+
+epochs_range = range(len(acc))
+
+plt.figure()
+plt.plot(epochs_range, acc, 'b', label='Training accuracy')
+plt.plot(epochs_range, val_acc, 'r.', label='Validation accuracy')
+plt.title('Training and Validation Accuracy')
+plt.xlabel('Epochs')
+plt.ylabel('Accuracy')
+plt.legend()
+
+plt.figure()
+plt.plot(epochs_range, loss, 'b', label='Training loss')
+plt.plot(epochs_range, val_loss, 'r.', label='Validation loss')
+plt.title('Training and Validation Loss')
+plt.xlabel('Epochs')
+plt.ylabel('Loss')
+plt.legend()
+
+plt.show()
